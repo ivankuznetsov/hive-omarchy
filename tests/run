@@ -1,0 +1,77 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+helper="$repo_dir/scripts/hive-status"
+test_root=$(mktemp -d "${TMPDIR:-/tmp}/hive-omarchy-tests.XXXXXX")
+trap 'rm -rf -- "$test_root"' EXIT
+
+pass_count=0
+
+fail() {
+  printf 'not ok - %s\n' "$1" >&2
+  exit 1
+}
+
+pass() {
+  ((pass_count += 1))
+  printf 'ok %d - %s\n' "$pass_count" "$1"
+}
+
+assert_jq() {
+  local payload="$1" expression="$2" message="$3"
+  jq -e "$expression" >/dev/null 2>&1 <<<"$payload" || fail "$message"
+}
+
+assert_contains() {
+  local haystack="$1" needle="$2" message="$3"
+  [[ $haystack == *"$needle"* ]] || fail "$message (missing: $needle)"
+}
+
+run_helper() {
+  PATH="$repo_dir/tests/fakes:/usr/bin:/bin" \
+    TEST_LOG="$test_root/calls.log" \
+    HIVE_STATUS_FIXTURE="$repo_dir/tests/status.json" \
+    "$helper" "$@"
+}
+
+chmod +x "$repo_dir/tests/fakes/"*
+: >"$test_root/calls.log"
+
+instances='[
+  {"name":"Local","url":"http://127.0.0.1:4567","transport":"local"},
+  {"name":"Hivebox","url":"https://hivebox.example.test","transport":"ssh","sshHost":"hivebox"}
+]'
+result=$(run_helper --instances "$instances" --timeout 2)
+assert_jq "$result" '.ok == true and .configured == 2 and .reachable == 2 and .daemon_running == 2' "local and remote Hives should aggregate"
+assert_jq "$result" '.running_task_count == 4 and all(.instances[]; (.tasks | length) == 2)' "only currently running tasks should be counted"
+assert_jq "$result" '.instances[1].tasks[0].web_url == "https://hivebox.example.test/tasks/alpha%20project/ship-status-widget-260811-abcd"' "task links should target the configured Hive web"
+calls=$(<"$test_root/calls.log")
+assert_contains "$calls" 'hive status --json' "local status should use the Hive CLI"
+assert_contains "$calls" 'ssh -o BatchMode=yes' "remote status should use batch-mode SSH"
+assert_contains "$calls" 'hivebox env LANG=C.UTF-8 LC_ALL=C.UTF-8 hive status --json' "remote status should use the configured SSH target"
+pass "multiple local and remote Hives report daemon and active-task status"
+
+result=$(run_helper --instances '[{"name":"Status only","url":"https://stopped.example.test","transport":"web"}]')
+assert_jq "$result" '.reachable == 1 and .daemon_running == 0' "a stopped daemon should remain distinguishable from an unreachable web"
+assert_jq "$result" '.instances[0].tasks_available == false and .instances[0].task_error == null' "web transport should be explicitly health-only"
+pass "web-only monitoring reports daemon health without claiming task access"
+
+result=$(SSH_FAIL=1 run_helper --instances '[{"name":"Remote","url":"https://healthy.example.test","transport":"ssh","sshHost":"broken"}]' --timeout 1)
+assert_jq "$result" '.instances[0].reachable == true and .instances[0].daemon.running == true' "SSH failure should not erase web daemon health"
+assert_jq "$result" '.instances[0].tasks_available == false and (.instances[0].task_error | contains("ssh: connect"))' "SSH failures should be visible as task errors"
+pass "remote task failures preserve independently observed daemon health"
+
+set +e
+invalid=$(run_helper --instances '{"not":"an array"}')
+invalid_status=$?
+set -e
+[[ $invalid_status -eq 2 ]] || fail "invalid configuration should exit 2"
+assert_jq "$invalid" '.ok == false and (.message | contains("JSON array"))' "invalid configuration should emit structured JSON"
+pass "invalid instance configuration fails with a machine-readable message"
+
+check=$(run_helper --instances "$instances" --check)
+assert_jq "$check" '.ok == true and .configured == 2 and .schema == "hive-omarchy-check"' "readiness check should validate configured instances"
+pass "readiness check validates dependencies and configuration"
+
+printf '1..%d\n' "$pass_count"

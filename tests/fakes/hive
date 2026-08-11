@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+printf 'hive %s\n' "$*" >>"${TEST_LOG:?}"
+[[ ${1:-} == status && ${2:-} == --json ]] || exit 64
+cat "${HIVE_STATUS_FIXTURE:?}"

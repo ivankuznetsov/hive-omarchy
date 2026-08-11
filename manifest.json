@@ -1,0 +1,65 @@
+{
+  "schemaVersion": 1,
+  "id": "io.github.ivankuznetsov.hive-status",
+  "name": "Hive Status",
+  "version": "0.1.0",
+  "author": "Ivan Kuznetsov",
+  "license": "MIT",
+  "description": "Monitor local and remote Hive daemons and their running tasks from the Omarchy bar.",
+  "kinds": [
+    "bar-widget"
+  ],
+  "activation": "on-demand",
+  "entryPoints": {
+    "barWidget": "Panel.qml"
+  },
+  "barWidget": {
+    "displayName": "Hive Status",
+    "description": "Daemon health and running tasks across one or more Hive instances.",
+    "category": "Development",
+    "aliases": [
+      "hive",
+      "tasks"
+    ],
+    "allowMultiple": false,
+    "defaults": {
+      "instancesJson": "[{\"name\":\"Local\",\"url\":\"http://127.0.0.1:4567\",\"transport\":\"local\"}]",
+      "refreshIntervalSec": 15,
+      "timeoutSec": 8,
+      "showTaskCount": true
+    },
+    "schema": [
+      {
+        "key": "instancesJson",
+        "type": "string",
+        "label": "Hive instances (JSON)",
+        "defaultValue": "[{\"name\":\"Local\",\"url\":\"http://127.0.0.1:4567\",\"transport\":\"local\"}]",
+        "description": "JSON array. Use transport local, ssh (with sshHost), or web for health-only monitoring."
+      },
+      {
+        "key": "refreshIntervalSec",
+        "type": "integer",
+        "label": "Refresh interval (seconds)",
+        "min": 5,
+        "max": 300,
+        "step": 5,
+        "defaultValue": 15
+      },
+      {
+        "key": "timeoutSec",
+        "type": "integer",
+        "label": "Connection timeout (seconds)",
+        "min": 1,
+        "max": 30,
+        "step": 1,
+        "defaultValue": 8
+      },
+      {
+        "key": "showTaskCount",
+        "type": "boolean",
+        "label": "Show running task count in the bar",
+        "defaultValue": true
+      }
+    ]
+  }
+}

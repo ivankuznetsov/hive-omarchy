@@ -1,0 +1,304 @@
+#!/usr/bin/env bash
+set -uo pipefail
+
+instances_json='[{"name":"Local","url":"http://127.0.0.1:4567","transport":"local"}]'
+timeout_seconds=8
+check_only=0
+
+usage() {
+  cat <<'USAGE'
+Usage: hive-status [options]
+
+Collect daemon health and running tasks from one or more Hive instances.
+
+Options:
+  --instances <json>  JSON array of Hive instance objects
+  --timeout <seconds> Per-instance connection timeout (1-30, default: 8)
+  --check             Validate dependencies and configuration
+  -h, --help          Show this help
+
+Instance fields:
+  name         Display name
+  url          Hive web base URL (required)
+  transport    local, ssh, or web (default: web; ssh inferred from sshHost)
+  sshHost      SSH alias, host, or user@host for remote task status
+  hiveCommand  Optional Hive executable path/name (default: hive)
+
+The web URL supplies daemon health through /health?deep=1. Local and SSH
+transports additionally run `hive status --json` to discover active tasks.
+USAGE
+}
+
+emit_error() {
+  local message="$1"
+  if command -v jq >/dev/null 2>&1; then
+    jq -cn --arg message "$message" \
+      '{schema:"hive-omarchy-status",schema_version:1,ok:false,message:$message,configured:0,reachable:0,daemon_running:0,running_task_count:0,instances:[]}'
+  else
+    printf '%s\n' '{"schema":"hive-omarchy-status","schema_version":1,"ok":false,"message":"Missing required dependency: jq","configured":0,"reachable":0,"daemon_running":0,"running_task_count":0,"instances":[]}'
+  fi
+}
+
+while (($# > 0)); do
+  case "$1" in
+    --instances)
+      [[ $# -ge 2 ]] || { emit_error "--instances requires a JSON value"; exit 2; }
+      instances_json="$2"
+      shift 2
+      ;;
+    --timeout)
+      [[ $# -ge 2 ]] || { emit_error "--timeout requires a value"; exit 2; }
+      timeout_seconds="$2"
+      shift 2
+      ;;
+    --check)
+      check_only=1
+      shift
+      ;;
+    -h | --help)
+      usage
+      exit 0
+      ;;
+    *)
+      emit_error "unknown option: $1"
+      exit 2
+      ;;
+  esac
+done
+
+if ! command -v jq >/dev/null 2>&1; then
+  emit_error "Missing required dependency: jq"
+  exit 69
+fi
+
+missing=()
+for dependency in curl timeout; do
+  command -v "$dependency" >/dev/null 2>&1 || missing+=("$dependency")
+done
+if ((${#missing[@]} > 0)); then
+  joined=$(IFS=', '; printf '%s' "${missing[*]}")
+  emit_error "Missing required dependency: $joined"
+  exit 69
+fi
+
+if ! [[ $timeout_seconds =~ ^[0-9]+$ ]] || ((timeout_seconds < 1 || timeout_seconds > 30)); then
+  emit_error "timeout must be an integer from 1 to 30 seconds"
+  exit 2
+fi
+
+if ! jq -e '
+  type == "array" and
+  all(.[];
+    type == "object" and
+    (.name | type == "string") and
+    (.url | type == "string" and length > 0) and
+    ((.transport == null) or (.transport | type == "string"))
+  )
+' >/dev/null 2>&1 <<<"$instances_json"; then
+  emit_error "instances must be a JSON array of objects with string name and url fields"
+  exit 2
+fi
+
+if ((check_only)); then
+  count=$(jq 'length' <<<"$instances_json")
+  jq -cn --argjson configured "$count" \
+    '{schema:"hive-omarchy-check",schema_version:1,ok:true,configured:$configured,message:(($configured|tostring) + " Hive instances configured")}'
+  exit 0
+fi
+
+task_status_json() {
+  local transport="$1" ssh_host="$2" hive_command="$3" stderr_file="$4"
+  local command_timeout=$((timeout_seconds + 2))
+
+  case "$transport" in
+    local)
+      timeout --signal=TERM "${command_timeout}s" "$hive_command" status --json 2>"$stderr_file"
+      ;;
+    ssh)
+      if ! command -v ssh >/dev/null 2>&1; then
+        printf 'ssh is not installed\n' >"$stderr_file"
+        return 127
+      fi
+      if [[ -z $ssh_host || $ssh_host == -* || ! $ssh_host =~ ^[A-Za-z0-9][A-Za-z0-9._:@%-]*$ ]]; then
+        printf 'invalid or missing sshHost\n' >"$stderr_file"
+        return 64
+      fi
+      if [[ -z $hive_command || $hive_command == -* || ! $hive_command =~ ^[A-Za-z0-9_./-]+$ ]]; then
+        printf 'invalid hiveCommand\n' >"$stderr_file"
+        return 64
+      fi
+      timeout --signal=TERM "${command_timeout}s" \
+        ssh -o BatchMode=yes -o "ConnectTimeout=$timeout_seconds" -o ConnectionAttempts=1 \
+          -o RemoteCommand=none -o RequestTTY=no "$ssh_host" \
+          env LANG=C.UTF-8 LC_ALL=C.UTF-8 "$hive_command" status --json 2>"$stderr_file"
+      ;;
+    *)
+      return 64
+      ;;
+  esac
+}
+
+infer_ssh_host() {
+  local url="$1"
+  url="${url#*://}"
+  url="${url%%/*}"
+  url="${url%%:*}"
+  printf '%s\n' "$url"
+}
+
+compact_error() {
+  local file="$1" fallback="$2" message=""
+  if [[ -s $file ]]; then
+    message=$(head -c 320 "$file" | tr '\n\t' '  ' | sed -E 's/[[:space:]]+/ /g; s/^ //; s/ $//')
+  fi
+  printf '%s\n' "${message:-$fallback}"
+}
+
+probe_instance() {
+  local index="$1" instance="$2" output_file="$3"
+  local name url transport ssh_host hive_command health_url
+  local health_body health_code reachable=false daemon_running=false error=""
+  local status_payload="" status_code=0 task_error="" tasks='[]' tasks_available=false
+  local health_stderr="$temp_root/health-$index.err"
+  local task_stderr="$temp_root/tasks-$index.err"
+
+  name=$(jq -r '.name' <<<"$instance")
+  url=$(jq -r '.url | sub("/+$"; "")' <<<"$instance")
+  transport=$(jq -r '.transport // (if ((.sshHost // "") | length) > 0 then "ssh" else "web" end)' <<<"$instance")
+  ssh_host=$(jq -r '.sshHost // empty' <<<"$instance")
+  hive_command=$(jq -r '.hiveCommand // "hive"' <<<"$instance")
+  [[ -n $ssh_host ]] || ssh_host=$(infer_ssh_host "$url")
+
+  health_url="$url/health?deep=1"
+  health_body=$(curl -sS --connect-timeout "$timeout_seconds" --max-time "$timeout_seconds" \
+    -- "$health_url" 2>"$health_stderr")
+  health_code=$?
+
+  if ((health_code == 0)) && jq -e 'type == "object" and has("ok")' >/dev/null 2>&1 <<<"$health_body"; then
+    reachable=true
+    if [[ $(jq -r '.daemon.running // false' <<<"$health_body") == true ]]; then
+      daemon_running=true
+    fi
+  else
+    error=$(compact_error "$health_stderr" "Hive web health check failed")
+  fi
+
+  case "$transport" in
+    local | ssh)
+      status_payload=$(task_status_json "$transport" "$ssh_host" "$hive_command" "$task_stderr")
+      status_code=$?
+      if jq -e '.ok == true and (.projects | type == "array")' >/dev/null 2>&1 <<<"$status_payload"; then
+        tasks_available=true
+        tasks=$(jq -c --arg base "$url" '
+          def active_attempt:
+            (.current_attempt? != null) and
+            ((.current_attempt.ended_at? // .current_attempt.finished_at? // null) == null) and
+            ((.current_attempt.status? // "running") as $state |
+              (["complete", "completed", "failed", "cancelled", "canceled", "error"] | index($state) | not));
+          [
+            .projects[]? as $project
+            | $project.tasks[]?
+            | select(
+                .live_task_lock == true or
+                .claude_pid_alive == true or
+                .marker == "running" or
+                active_attempt
+              )
+            | {
+                project: ($project.name // ""),
+                slug: (.slug // ""),
+                title: (.display_name // .slug // "Task"),
+                stage: (.stage // "unknown"),
+                status: (.marker // .current_attempt.status // .action // "running"),
+                action: (.action // null),
+                web_url: ($base + "/tasks/" + (($project.name // "") | @uri) + "/" + ((.slug // "") | @uri))
+              }
+          ]
+        ' <<<"$status_payload")
+      else
+        task_error=$(jq -r '.message // empty' <<<"$status_payload" 2>/dev/null || true)
+        [[ -n $task_error ]] || task_error=$(compact_error "$task_stderr" "hive status failed (exit $status_code)")
+      fi
+      ;;
+    web)
+      ;;
+    *)
+      task_error="Unknown transport: $transport"
+      ;;
+  esac
+
+  jq -cn \
+    --arg name "$name" \
+    --arg url "$url" \
+    --arg transport "$transport" \
+    --arg health_url "$health_url" \
+    --arg error "$error" \
+    --arg task_error "$task_error" \
+    --argjson reachable "$reachable" \
+    --argjson daemon_running "$daemon_running" \
+    --argjson tasks_available "$tasks_available" \
+    --argjson tasks "$tasks" \
+    '{
+      name:$name,
+      url:$url,
+      transport:$transport,
+      reachable:$reachable,
+      daemon:{running:$daemon_running,health_url:$health_url},
+      tasks_available:$tasks_available,
+      tasks:$tasks,
+      error:(if $error == "" then null else $error end),
+      task_error:(if $task_error == "" then null else $task_error end)
+    }' >"$output_file"
+}
+
+temp_root=$(mktemp -d "${TMPDIR:-/tmp}/hive-omarchy-status.XXXXXX")
+cleanup() {
+  if [[ -n ${temp_root:-} && -d $temp_root && $temp_root == "${TMPDIR:-/tmp}"/hive-omarchy-status.* ]]; then
+    rm -rf -- "$temp_root"
+  fi
+}
+trap cleanup EXIT
+
+instance_count=$(jq 'length' <<<"$instances_json")
+pids=()
+for ((index = 0; index < instance_count; index++)); do
+  instance=$(jq -c ".[$index]" <<<"$instances_json")
+  probe_instance "$index" "$instance" "$temp_root/instance-$index.json" &
+  pids+=("$!")
+done
+
+for pid in "${pids[@]}"; do
+  wait "$pid" || true
+done
+
+instance_files=()
+for ((index = 0; index < instance_count; index++)); do
+  if [[ ! -s $temp_root/instance-$index.json ]]; then
+    jq -cn --arg name "Hive $((index + 1))" \
+      '{name:$name,url:"",transport:"unknown",reachable:false,daemon:{running:false},tasks_available:false,tasks:[],error:"Status probe failed",task_error:null}' \
+      >"$temp_root/instance-$index.json"
+  fi
+  instance_files+=("$temp_root/instance-$index.json")
+done
+
+if ((instance_count == 0)); then
+  instances='[]'
+else
+  instances=$(jq -sc '.' "${instance_files[@]}")
+fi
+
+generated_at=$(date -u +'%Y-%m-%dT%H:%M:%SZ')
+jq -cn \
+  --arg generated_at "$generated_at" \
+  --argjson instances "$instances" \
+  '{
+    schema:"hive-omarchy-status",
+    schema_version:1,
+    ok:true,
+    generated_at:$generated_at,
+    configured:($instances | length),
+    reachable:([$instances[] | select(.reachable == true)] | length),
+    daemon_running:([$instances[] | select(.daemon.running == true)] | length),
+    running_task_count:([$instances[].tasks | length] | add // 0),
+    instances:$instances
+  }'

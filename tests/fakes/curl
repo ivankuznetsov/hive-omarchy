@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+url="${*: -1}"
+printf 'curl %s\n' "$url" >>"${TEST_LOG:?}"
+
+case "$url" in
+  *unreachable*)
+    printf 'curl: connection refused\n' >&2
+    exit 7
+    ;;
+  *stopped*)
+    printf '%s\n' '{"ok":false,"daemon":{"running":false}}'
+    ;;
+  *)
+    printf '%s\n' '{"ok":true,"daemon":{"running":true,"pid":4242}}'
+    ;;
+esac

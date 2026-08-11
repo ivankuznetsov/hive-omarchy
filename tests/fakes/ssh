@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+printf 'ssh %s\n' "$*" >>"${TEST_LOG:?}"
+if [[ ${SSH_FAIL:-0} == 1 ]]; then
+  printf 'ssh: connect to host failed\n' >&2
+  exit 255
+fi
+cat "${HIVE_STATUS_FIXTURE:?}"
