@@ -127,10 +127,22 @@ task_status_json() {
         printf 'invalid hiveCommand\n' >"$stderr_file"
         return 64
       fi
-      timeout --signal=TERM "${command_timeout}s" \
-        ssh -o BatchMode=yes -o "ConnectTimeout=$timeout_seconds" -o ConnectionAttempts=1 \
-          -o RemoteCommand=none -o RequestTTY=no "$ssh_host" \
-          env LANG=C.UTF-8 LC_ALL=C.UTF-8 "$hive_command" status --json 2>"$stderr_file"
+      if [[ $hive_command == hive ]]; then
+        # SSH commands do not normally load the user's login PATH. Hive's
+        # managed installs live under ~/.local/bin, so resolve the default
+        # command through a login shell just like an interactive Hivebox
+        # session does. The command string is fixed; instance data never
+        # reaches this shell boundary.
+        timeout --signal=TERM "${command_timeout}s" \
+          ssh -o BatchMode=yes -o "ConnectTimeout=$timeout_seconds" -o ConnectionAttempts=1 \
+            -o RemoteCommand=none -o RequestTTY=no "$ssh_host" \
+            "env LANG=C.UTF-8 LC_ALL=C.UTF-8 bash -lc 'exec hive status --json'" 2>"$stderr_file"
+      else
+        timeout --signal=TERM "${command_timeout}s" \
+          ssh -o BatchMode=yes -o "ConnectTimeout=$timeout_seconds" -o ConnectionAttempts=1 \
+            -o RemoteCommand=none -o RequestTTY=no "$ssh_host" \
+            env LANG=C.UTF-8 LC_ALL=C.UTF-8 "$hive_command" status --json 2>"$stderr_file"
+      fi
       ;;
     *)
       return 64
@@ -191,7 +203,7 @@ probe_instance() {
         tasks_available=true
         tasks=$(jq -c --arg base "$url" '
           def active_attempt:
-            (.current_attempt? != null) and
+            ((.current_attempt? | type) == "object") and
             ((.current_attempt.ended_at? // .current_attempt.finished_at? // null) == null) and
             ((.current_attempt.status? // "running") as $state |
               (["complete", "completed", "failed", "cancelled", "canceled", "error"] | index($state) | not));

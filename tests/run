@@ -49,7 +49,7 @@ assert_jq "$result" '.instances[1].tasks[0].web_url == "https://hivebox.example.
 calls=$(<"$test_root/calls.log")
 assert_contains "$calls" 'hive status --json' "local status should use the Hive CLI"
 assert_contains "$calls" 'ssh -o BatchMode=yes' "remote status should use batch-mode SSH"
-assert_contains "$calls" 'hivebox env LANG=C.UTF-8 LC_ALL=C.UTF-8 hive status --json' "remote status should use the configured SSH target"
+assert_contains "$calls" "hivebox env LANG=C.UTF-8 LC_ALL=C.UTF-8 bash -lc 'exec hive status --json'" "remote status should resolve Hive through the remote login PATH"
 pass "multiple local and remote Hives report daemon and active-task status"
 
 result=$(run_helper --instances '[{"name":"Status only","url":"https://stopped.example.test","transport":"web"}]')

@@ -52,6 +52,16 @@
             "status": "completed",
             "ended_at": "2026-08-11T09:59:00Z"
           }
+        },
+        {
+          "slug": "historical-attempt-260811-ab12",
+          "display_name": "Historical Attempt",
+          "stage": "6-review",
+          "marker": "review_waiting",
+          "action": "needs_input",
+          "live_task_lock": false,
+          "claude_pid_alive": false,
+          "current_attempt": "6f924e2f-51dd-42be-8f5b-bee8d0de1a84"
         }
       ]
     }
