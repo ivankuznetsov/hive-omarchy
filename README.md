@@ -82,6 +82,7 @@ An optional `hiveCommand` selects another Hive executable, for example `"hiveCom
 - Middle click: refresh every instance.
 - Right click: open Hive web when exactly one instance is configured.
 - In the popup: click a Hive header to open its web interface, or a task to open its task page.
+- When Tailscale SSH requests an additional check, click **Authorize Tailscale** to open its login URL in your browser.
 - Keyboard: `R` refreshes, `O` opens the first Hive, and `Esc` closes the popup.
 
 ## Helper CLI

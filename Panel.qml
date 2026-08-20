@@ -21,11 +21,22 @@ Panel {
   implicitHeight: button.implicitHeight
 
   function openHive(instance) {
-    if (instance && instance.url) Qt.openUrlExternally(String(instance.url))
+    if (instance && instance.url) openExternalUrl(String(instance.url))
   }
 
   function openTask(task) {
-    if (task && task.web_url) Qt.openUrlExternally(String(task.web_url))
+    if (task && task.web_url) openExternalUrl(String(task.web_url))
+  }
+
+  function openTaskError(instance) {
+    if (instance && instance.tailscale_auth_url) openExternalUrl(String(instance.tailscale_auth_url))
+  }
+
+  function openExternalUrl(url) {
+    var target = String(url || "")
+    if (target.indexOf("https://") !== 0 && target.indexOf("http://") !== 0) return
+    Quickshell.execDetached(["omarchy-launch-browser", target])
+    root.close()
   }
 
   function stateColor(instance) {
@@ -206,10 +217,58 @@ Panel {
                     visible: !modelData.tasks || modelData.tasks.length === 0
                     width: parent.width
                     text: Model.instanceDetail(modelData)
-                    color: modelData.task_error ? root.urgent : root.dim
+                    color: modelData.tailscale_auth_url ? root.foreground : (modelData.task_error ? root.urgent : root.dim)
                     font.family: root.fontFamily
                     font.pixelSize: Style.font.bodySmall
                     wrapMode: Text.WordWrap
+
+                    MouseArea {
+                      anchors.fill: parent
+                      enabled: !!modelData.tailscale_auth_url
+                      hoverEnabled: enabled
+                      cursorShape: enabled ? Qt.PointingHandCursor : Qt.ArrowCursor
+                      onClicked: root.openTaskError(modelData)
+                    }
+                  }
+
+                  Rectangle {
+                    visible: !!modelData.tailscale_auth_url
+                    width: parent.width
+                    implicitHeight: Style.space(34)
+                    radius: Style.space(6)
+                    color: authMouse.containsMouse
+                      ? Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.10)
+                      : "transparent"
+
+                    RowLayout {
+                      anchors.fill: parent
+                      anchors.leftMargin: Style.space(8)
+                      anchors.rightMargin: Style.space(8)
+
+                      Text {
+                        text: "Authorize Tailscale"
+                        color: root.foreground
+                        font.family: root.fontFamily
+                        font.pixelSize: Style.font.bodySmall
+                        font.bold: true
+                        Layout.fillWidth: true
+                      }
+
+                      Text {
+                        text: "↗"
+                        color: root.foreground
+                        font.family: root.fontFamily
+                        font.pixelSize: Style.font.body
+                      }
+                    }
+
+                    MouseArea {
+                      id: authMouse
+                      anchors.fill: parent
+                      hoverEnabled: true
+                      cursorShape: Qt.PointingHandCursor
+                      onClicked: root.openTaskError(modelData)
+                    }
                   }
 
                   Column {

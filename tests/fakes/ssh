@@ -6,4 +6,8 @@ if [[ ${SSH_FAIL:-0} == 1 ]]; then
   printf 'ssh: connect to host failed\n' >&2
   exit 255
 fi
+if [[ ${TAILSCALE_AUTH_FAIL:-0} == 1 ]]; then
+  printf '# Tailscale SSH requires an additional check. # To authenticate, visit: https://login.tailscale.com/a/11efb387381431\n' >&2
+  exit 255
+fi
 cat "${HIVE_STATUS_FIXTURE:?}"

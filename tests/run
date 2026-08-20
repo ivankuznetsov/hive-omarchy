@@ -60,7 +60,12 @@ pass "web-only monitoring reports daemon health without claiming task access"
 result=$(SSH_FAIL=1 run_helper --instances '[{"name":"Remote","url":"https://healthy.example.test","transport":"ssh","sshHost":"broken"}]' --timeout 1)
 assert_jq "$result" '.instances[0].reachable == true and .instances[0].daemon.running == true' "SSH failure should not erase web daemon health"
 assert_jq "$result" '.instances[0].tasks_available == false and (.instances[0].task_error | contains("ssh: connect"))' "SSH failures should be visible as task errors"
+assert_jq "$result" '.instances[0].tailscale_auth_url == null' "SSH failures without a URL should not expose an action"
 pass "remote task failures preserve independently observed daemon health"
+
+result=$(TAILSCALE_AUTH_FAIL=1 run_helper --instances '[{"name":"Remote","url":"https://healthy.example.test","transport":"ssh","sshHost":"needs-auth"}]' --timeout 1)
+assert_jq "$result" '.instances[0].tailscale_auth_url == "https://login.tailscale.com/a/11efb387381431"' "Tailscale SSH authorization URLs should be exposed as actions"
+pass "Tailscale SSH authorization failures expose a browser link"
 
 set +e
 invalid=$(run_helper --instances '{"not":"an array"}')

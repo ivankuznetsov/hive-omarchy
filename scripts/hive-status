@@ -170,7 +170,7 @@ probe_instance() {
   local index="$1" instance="$2" output_file="$3"
   local name url transport ssh_host hive_command health_url
   local health_body health_code reachable=false daemon_running=false error=""
-  local status_payload="" status_code=0 task_error="" tasks='[]' tasks_available=false
+  local status_payload="" status_code=0 task_error="" tailscale_auth_url="" tasks='[]' tasks_available=false
   local health_stderr="$temp_root/health-$index.err"
   local task_stderr="$temp_root/tasks-$index.err"
 
@@ -230,6 +230,7 @@ probe_instance() {
       else
         task_error=$(jq -r '.message // empty' <<<"$status_payload" 2>/dev/null || true)
         [[ -n $task_error ]] || task_error=$(compact_error "$task_stderr" "hive status failed (exit $status_code)")
+        tailscale_auth_url=$(grep -Eo 'https://login[.]tailscale[.]com/a/[-A-Za-z0-9._~]+' <<<"$task_error" | head -n 1 || true)
       fi
       ;;
     web)
@@ -246,6 +247,7 @@ probe_instance() {
     --arg health_url "$health_url" \
     --arg error "$error" \
     --arg task_error "$task_error" \
+    --arg tailscale_auth_url "$tailscale_auth_url" \
     --argjson reachable "$reachable" \
     --argjson daemon_running "$daemon_running" \
     --argjson tasks_available "$tasks_available" \
@@ -259,7 +261,8 @@ probe_instance() {
       tasks_available:$tasks_available,
       tasks:$tasks,
       error:(if $error == "" then null else $error end),
-      task_error:(if $task_error == "" then null else $task_error end)
+      task_error:(if $task_error == "" then null else $task_error end),
+      tailscale_auth_url:(if $tailscale_auth_url == "" then null else $tailscale_auth_url end)
     }' >"$output_file"
 }
 
