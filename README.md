@@ -4,6 +4,8 @@ Monitor one or more [Hive](https://github.com/ivankuznetsov/hive) instances from
 
 The plugin supports a local Hive, remote Hives, or any mix of them. Health and task access are intentionally independent: every web URL is checked through Hive's public deep-health endpoint, while task status uses the local Hive CLI or batch-mode SSH. No Hive or GitHub credentials are copied into the plugin.
 
+![Hive Status showing a healthy local Hive and two active tasks](preview.png)
+
 ## Requirements
 
 - Omarchy 4 / Quattro
