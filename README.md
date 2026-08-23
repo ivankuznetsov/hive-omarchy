@@ -78,6 +78,8 @@ Use `"transport":"web"` when only daemon health and an open-web link are needed.
 
 An optional `hiveCommand` selects another Hive executable, for example `"hiveCommand":"/usr/local/bin/hive"`.
 
+For predictable shell resource use, configuration is limited to 32 KiB and 16 Hive instances. Each health response is limited to 64 KiB, each CLI or SSH status response to 1 MiB, and each instance to 100 active tasks. Oversized inputs are rejected with a visible status error.
+
 ## Interaction
 
 - Left click: open the Hive status popup.

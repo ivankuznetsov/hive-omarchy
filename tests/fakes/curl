@@ -4,6 +4,13 @@ set -euo pipefail
 url="${*: -1}"
 printf 'curl %s\n' "$url" >>"${TEST_LOG:?}"
 
+if [[ ${CURL_LARGE_OUTPUT:-0} == 1 ]]; then
+  printf '{"ok":true,"daemon":{"running":true},"padding":"'
+  printf '%*s' 66000 '' | tr ' ' x
+  printf '"}\n'
+  exit 0
+fi
+
 case "$url" in
   *unreachable*)
     printf 'curl: connection refused\n' >&2

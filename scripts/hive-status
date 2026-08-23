@@ -4,6 +4,12 @@ set -uo pipefail
 instances_json='[{"name":"Local","url":"http://127.0.0.1:4567","transport":"local"}]'
 timeout_seconds=8
 check_only=0
+max_instances_json_bytes=32768
+max_instances=16
+max_health_bytes=65536
+max_status_bytes=1048576
+max_result_bytes=1048576
+max_tasks_per_instance=100
 
 usage() {
   cat <<'USAGE'
@@ -71,6 +77,12 @@ if ! command -v jq >/dev/null 2>&1; then
   exit 69
 fi
 
+instances_json_bytes=$(LC_ALL=C printf '%s' "$instances_json" | wc -c)
+if ((instances_json_bytes > max_instances_json_bytes)); then
+  emit_error "instances JSON exceeds the ${max_instances_json_bytes}-byte safety limit"
+  exit 2
+fi
+
 missing=()
 for dependency in curl timeout; do
   command -v "$dependency" >/dev/null 2>&1 || missing+=("$dependency")
@@ -90,29 +102,61 @@ if ! jq -e '
   type == "array" and
   all(.[];
     type == "object" and
-    (.name | type == "string") and
-    (.url | type == "string" and length > 0) and
-    ((.transport == null) or (.transport | type == "string"))
+    (.name | type == "string" and length <= 128) and
+    (.url | type == "string" and length > 0 and length <= 2048) and
+    ((.transport == null) or (.transport | type == "string" and length <= 16)) and
+    ((.sshHost == null) or (.sshHost | type == "string" and length <= 255)) and
+    ((.hiveCommand == null) or (.hiveCommand | type == "string" and length <= 1024))
   )
 ' >/dev/null 2>&1 <<<"$instances_json"; then
-  emit_error "instances must be a JSON array of objects with string name and url fields"
+  emit_error "instances must be a JSON array with bounded string name and url fields"
+  exit 2
+fi
+
+instance_count=$(jq 'length' <<<"$instances_json")
+if ((instance_count > max_instances)); then
+  emit_error "Hive Status supports at most $max_instances instances"
   exit 2
 fi
 
 if ((check_only)); then
-  count=$(jq 'length' <<<"$instances_json")
-  jq -cn --argjson configured "$count" \
+  jq -cn --argjson configured "$instance_count" \
     '{schema:"hive-omarchy-check",schema_version:1,ok:true,configured:$configured,message:(($configured|tostring) + " Hive instances configured")}'
   exit 0
 fi
 
+file_size() {
+  local file="$1"
+  if [[ -f $file ]]; then
+    wc -c <"$file" | tr -d '[:space:]'
+  else
+    printf '0\n'
+  fi
+}
+
+bounded_command() {
+  local max_bytes="$1" stdout_file="$2" stderr_file="$3"
+  shift 3
+  # Leave a small sentinel window above the advertised ceiling so callers can
+  # distinguish oversized output, while the hard limit keeps child processes
+  # from raising the bound or filling an unbounded capture file.
+  local file_blocks=$(((max_bytes + 2048 + 1023) / 1024))
+
+  (
+    ulimit -S -f "$file_blocks"
+    ulimit -H -f "$file_blocks"
+    exec "$@"
+  ) >"$stdout_file" 2>"$stderr_file"
+}
+
 task_status_json() {
-  local transport="$1" ssh_host="$2" hive_command="$3" stderr_file="$4"
+  local transport="$1" ssh_host="$2" hive_command="$3" stderr_file="$4" stdout_file="$5"
   local command_timeout=$((timeout_seconds + 2))
 
   case "$transport" in
     local)
-      timeout --signal=TERM "${command_timeout}s" "$hive_command" status --json 2>"$stderr_file"
+      bounded_command "$max_status_bytes" "$stdout_file" "$stderr_file" \
+        timeout --signal=TERM "${command_timeout}s" "$hive_command" status --json
       ;;
     ssh)
       if ! command -v ssh >/dev/null 2>&1; then
@@ -133,15 +177,17 @@ task_status_json() {
         # command through a login shell just like an interactive Hivebox
         # session does. The command string is fixed; instance data never
         # reaches this shell boundary.
-        timeout --signal=TERM "${command_timeout}s" \
+        bounded_command "$max_status_bytes" "$stdout_file" "$stderr_file" \
+          timeout --signal=TERM "${command_timeout}s" \
           ssh -o BatchMode=yes -o "ConnectTimeout=$timeout_seconds" -o ConnectionAttempts=1 \
             -o RemoteCommand=none -o RequestTTY=no "$ssh_host" \
-            "env LANG=C.UTF-8 LC_ALL=C.UTF-8 bash -lc 'exec hive status --json'" 2>"$stderr_file"
+            "env LANG=C.UTF-8 LC_ALL=C.UTF-8 bash -lc 'exec hive status --json'"
       else
-        timeout --signal=TERM "${command_timeout}s" \
+        bounded_command "$max_status_bytes" "$stdout_file" "$stderr_file" \
+          timeout --signal=TERM "${command_timeout}s" \
           ssh -o BatchMode=yes -o "ConnectTimeout=$timeout_seconds" -o ConnectionAttempts=1 \
             -o RemoteCommand=none -o RequestTTY=no "$ssh_host" \
-            env LANG=C.UTF-8 LC_ALL=C.UTF-8 "$hive_command" status --json 2>"$stderr_file"
+            env LANG=C.UTF-8 LC_ALL=C.UTF-8 "$hive_command" status --json
       fi
       ;;
     *)
@@ -171,7 +217,10 @@ probe_instance() {
   local name url transport ssh_host hive_command health_url
   local health_body health_code reachable=false daemon_running=false error=""
   local status_payload="" status_code=0 task_error="" tailscale_auth_url="" tasks='[]' tasks_available=false
+  local health_body_bytes health_error_bytes task_output_bytes task_error_bytes
+  local health_body_file="$temp_root/health-$index.out"
   local health_stderr="$temp_root/health-$index.err"
+  local task_stdout="$temp_root/tasks-$index.out"
   local task_stderr="$temp_root/tasks-$index.err"
 
   name=$(jq -r '.name' <<<"$instance")
@@ -182,26 +231,41 @@ probe_instance() {
   [[ -n $ssh_host ]] || ssh_host=$(infer_ssh_host "$url")
 
   health_url="$url/health?deep=1"
-  health_body=$(curl -sS --connect-timeout "$timeout_seconds" --max-time "$timeout_seconds" \
-    -- "$health_url" 2>"$health_stderr")
+  bounded_command "$max_health_bytes" "$health_body_file" "$health_stderr" \
+    curl -sS --connect-timeout "$timeout_seconds" --max-time "$timeout_seconds" -- "$health_url"
   health_code=$?
+  health_body_bytes=$(file_size "$health_body_file")
+  health_error_bytes=$(file_size "$health_stderr")
 
-  if ((health_code == 0)) && jq -e 'type == "object" and has("ok")' >/dev/null 2>&1 <<<"$health_body"; then
+  if ((health_body_bytes > max_health_bytes || health_error_bytes > max_health_bytes)); then
+    error="Hive health output exceeded the ${max_health_bytes}-byte safety limit"
+  else
+    health_body=$(<"$health_body_file")
+  fi
+
+  if [[ -z $error ]] && ((health_code == 0)) && jq -e 'type == "object" and has("ok")' >/dev/null 2>&1 <<<"$health_body"; then
     reachable=true
     if [[ $(jq -r '.daemon.running // false' <<<"$health_body") == true ]]; then
       daemon_running=true
     fi
-  else
+  elif [[ -z $error ]]; then
     error=$(compact_error "$health_stderr" "Hive web health check failed")
   fi
 
   case "$transport" in
     local | ssh)
-      status_payload=$(task_status_json "$transport" "$ssh_host" "$hive_command" "$task_stderr")
+      task_status_json "$transport" "$ssh_host" "$hive_command" "$task_stderr" "$task_stdout"
       status_code=$?
-      if jq -e '.ok == true and (.projects | type == "array")' >/dev/null 2>&1 <<<"$status_payload"; then
+      task_output_bytes=$(file_size "$task_stdout")
+      task_error_bytes=$(file_size "$task_stderr")
+      if ((task_output_bytes > max_status_bytes || task_error_bytes > max_status_bytes)); then
+        task_error="Hive status output exceeded the ${max_status_bytes}-byte safety limit"
+      else
+        status_payload=$(<"$task_stdout")
+      fi
+      if [[ -z $task_error ]] && jq -e '.ok == true and (.projects | type == "array")' >/dev/null 2>&1 <<<"$status_payload"; then
         tasks_available=true
-        tasks=$(jq -c --arg base "$url" '
+        tasks=$(jq -c --arg base "$url" --argjson max_tasks "$max_tasks_per_instance" '
           def active_attempt:
             ((.current_attempt? | type) == "object") and
             ((.current_attempt.ended_at? // .current_attempt.finished_at? // null) == null) and
@@ -216,19 +280,21 @@ probe_instance() {
                 .marker == "running" or
                 active_attempt
               )
+            | (($project.name // "") | tostring | .[0:128]) as $project_name
+            | ((.slug // "") | tostring | .[0:256]) as $slug
             | {
-                project: ($project.name // ""),
-                slug: (.slug // ""),
-                title: (.display_name // .slug // "Task"),
-                stage: (.stage // "unknown"),
-                status: (.marker // .current_attempt.status // .action // "running"),
-                action: (.action // null),
-                web_url: ($base + "/tasks/" + (($project.name // "") | @uri) + "/" + ((.slug // "") | @uri))
+                project: $project_name,
+                slug: $slug,
+                title: ((.display_name // .slug // "Task") | tostring | .[0:256]),
+                stage: ((.stage // "unknown") | tostring | .[0:64]),
+                status: ((.marker // .current_attempt.status // .action // "running") | tostring | .[0:64]),
+                action: (if .action == null then null else (.action | tostring | .[0:64]) end),
+                web_url: ($base + "/tasks/" + ($project_name | @uri) + "/" + ($slug | @uri))
               }
-          ]
+          ] | .[:$max_tasks]
         ' <<<"$status_payload")
-      else
-        task_error=$(jq -r '.message // empty' <<<"$status_payload" 2>/dev/null || true)
+      elif [[ -z $task_error ]]; then
+        task_error=$(jq -r '(.message // empty) | tostring | .[0:320]' <<<"$status_payload" 2>/dev/null || true)
         [[ -n $task_error ]] || task_error=$(compact_error "$task_stderr" "hive status failed (exit $status_code)")
         tailscale_auth_url=$(grep -Eo 'https://login[.]tailscale[.]com/a/[-A-Za-z0-9._~]+' <<<"$task_error" | head -n 1 || true)
       fi
@@ -274,7 +340,6 @@ cleanup() {
 }
 trap cleanup EXIT
 
-instance_count=$(jq 'length' <<<"$instances_json")
 pids=()
 for ((index = 0; index < instance_count; index++)); do
   instance=$(jq -c ".[$index]" <<<"$instances_json")
@@ -303,6 +368,7 @@ else
 fi
 
 generated_at=$(date -u +'%Y-%m-%dT%H:%M:%SZ')
+result_file="$temp_root/result.json"
 jq -cn \
   --arg generated_at "$generated_at" \
   --argjson instances "$instances" \
@@ -316,4 +382,11 @@ jq -cn \
     daemon_running:([$instances[] | select(.daemon.running == true)] | length),
     running_task_count:([$instances[].tasks | length] | add // 0),
     instances:$instances
-  }'
+  }' >"$result_file"
+
+result_bytes=$(file_size "$result_file")
+if ((result_bytes > max_result_bytes)); then
+  emit_error "Hive status result exceeded the ${max_result_bytes}-byte safety limit"
+  exit 70
+fi
+cat "$result_file"

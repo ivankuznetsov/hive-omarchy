@@ -67,6 +67,14 @@ result=$(TAILSCALE_AUTH_FAIL=1 run_helper --instances '[{"name":"Remote","url":"
 assert_jq "$result" '.instances[0].tailscale_auth_url == "https://login.tailscale.com/a/11efb387381431"' "Tailscale SSH authorization URLs should be exposed as actions"
 pass "Tailscale SSH authorization failures expose a browser link"
 
+result=$(CURL_LARGE_OUTPUT=1 run_helper --instances '[{"name":"Large health","url":"https://healthy.example.test","transport":"web"}]')
+assert_jq "$result" '.instances[0].reachable == false and (.instances[0].error | contains("65536-byte"))' "oversized health responses should be rejected before JSON processing"
+pass "health response capture is bounded"
+
+result=$(HIVE_LARGE_OUTPUT=1 run_helper --instances '[{"name":"Large status","url":"https://healthy.example.test","transport":"local"}]')
+assert_jq "$result" '.instances[0].reachable == true and .instances[0].tasks_available == false and (.instances[0].task_error | contains("1048576-byte"))' "oversized Hive status output should be rejected before JSON processing"
+pass "Hive command output capture is bounded"
+
 set +e
 invalid=$(run_helper --instances '{"not":"an array"}')
 invalid_status=$?
@@ -74,6 +82,25 @@ set -e
 [[ $invalid_status -eq 2 ]] || fail "invalid configuration should exit 2"
 assert_jq "$invalid" '.ok == false and (.message | contains("JSON array"))' "invalid configuration should emit structured JSON"
 pass "invalid instance configuration fails with a machine-readable message"
+
+printf -v oversized_name '%*s' 33000 ''
+oversized_name=${oversized_name// /x}
+set +e
+oversized=$(run_helper --instances "[{\"name\":\"$oversized_name\",\"url\":\"https://healthy.example.test\",\"transport\":\"web\"}]")
+oversized_status=$?
+set -e
+[[ $oversized_status -eq 2 ]] || fail "oversized instance configuration should exit 2"
+assert_jq "$oversized" '.ok == false and (.message | contains("32768-byte"))' "oversized instance configuration should report its byte ceiling"
+pass "instance configuration has a byte ceiling"
+
+too_many=$(jq -cn '[range(17) | {name:("Hive " + tostring),url:"https://healthy.example.test",transport:"web"}]')
+set +e
+too_many_result=$(run_helper --instances "$too_many")
+too_many_status=$?
+set -e
+[[ $too_many_status -eq 2 ]] || fail "too many instances should exit 2"
+assert_jq "$too_many_result" '.ok == false and (.message | contains("at most 16"))' "instance item ceiling should be reported"
+pass "instance configuration has an item ceiling"
 
 check=$(run_helper --instances "$instances" --check)
 assert_jq "$check" '.ok == true and .configured == 2 and .schema == "hive-omarchy-check"' "readiness check should validate configured instances"

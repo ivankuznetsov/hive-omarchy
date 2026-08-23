@@ -16,6 +16,8 @@ Item {
   readonly property int refreshIntervalSec: intSetting("refreshIntervalSec", 15, 5, 300)
   readonly property int timeoutSec: intSetting("timeoutSec", 8, 1, 30)
   readonly property bool showTaskCount: boolSetting("showTaskCount", true)
+  readonly property int maxInstancesJsonBytes: 32768
+  readonly property int maxInstances: 16
   readonly property int runningTaskCount: status.runningTaskCount || 0
   readonly property int daemonRunning: status.daemonRunning || 0
   readonly property int configured: status.configured || 0
@@ -27,9 +29,6 @@ Item {
   }
   readonly property string barLabel: "🐝" + (showTaskCount && runningTaskCount > 0 ? " " + runningTaskCount : "")
   readonly property string tooltipText: Model.tooltip(status, refreshing)
-
-  property string _stdout: ""
-  property string _stderr: ""
 
   function setting(name, fallback) {
     var value = settings ? settings[name] : undefined
@@ -49,12 +48,53 @@ Item {
     return normalized === "true" || normalized === "yes" || normalized === "on" || normalized === "1"
   }
 
+  function utf8ByteLength(value, stopAfter) {
+    var text = String(value || "")
+    var bytes = 0
+    for (var index = 0; index < text.length; index++) {
+      var code = text.charCodeAt(index)
+      if (code <= 0x7f) bytes += 1
+      else if (code <= 0x7ff) bytes += 2
+      else if (code >= 0xd800 && code <= 0xdbff && index + 1 < text.length
+               && text.charCodeAt(index + 1) >= 0xdc00 && text.charCodeAt(index + 1) <= 0xdfff) {
+        bytes += 4
+        index += 1
+      } else bytes += 3
+      if (bytes > stopAfter) return bytes
+    }
+    return bytes
+  }
+
+  function rejectConfiguration(message) {
+    refreshing = false
+    lastError = message
+    status = Model.emptyStatus(message)
+  }
+
   function refresh() {
     if (statusProcess.running || helperPath === "") return
-    _stdout = ""
-    _stderr = ""
+    var rawInstances = instancesJson
+    if (utf8ByteLength(rawInstances, maxInstancesJsonBytes) > maxInstancesJsonBytes) {
+      rejectConfiguration("Hive instances JSON exceeds the 32 KiB safety limit")
+      return
+    }
+    var parsedInstances
+    try {
+      parsedInstances = JSON.parse(rawInstances)
+    } catch (error) {
+      rejectConfiguration("Hive instances must be valid JSON")
+      return
+    }
+    if (!Array.isArray(parsedInstances)) {
+      rejectConfiguration("Hive instances must be a JSON array")
+      return
+    }
+    if (parsedInstances.length > maxInstances) {
+      rejectConfiguration("Hive Status supports at most " + maxInstances + " instances")
+      return
+    }
     refreshing = true
-    statusProcess.command = [helperPath, "--instances", instancesJson, "--timeout", String(timeoutSec)]
+    statusProcess.command = [helperPath, "--instances", rawInstances, "--timeout", String(timeoutSec)]
     statusProcess.running = true
   }
 
@@ -79,19 +119,17 @@ Item {
     stdout: StdioCollector {
       id: statusStdout
       waitForEnd: true
-      onStreamFinished: root._stdout = text
     }
     stderr: StdioCollector {
       id: statusStderr
       waitForEnd: true
-      onStreamFinished: root._stderr = text
     }
     onExited: function(exitCode) {
       root.refreshing = false
-      var output = String(statusStdout.text || root._stdout || "")
+      var output = String(statusStdout.text || "")
       if (output.trim() !== "") root.applyStatus(output)
       else {
-        var error = String(statusStderr.text || root._stderr || "").replace(/\s+/g, " ").trim()
+        var error = String(statusStderr.text || "").replace(/\s+/g, " ").trim().substring(0, 512)
         root.lastError = error || "Hive status helper failed"
         root.status = Model.emptyStatus(root.lastError)
       }

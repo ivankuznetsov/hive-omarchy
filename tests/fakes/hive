@@ -3,4 +3,10 @@ set -euo pipefail
 
 printf 'hive %s\n' "$*" >>"${TEST_LOG:?}"
 [[ ${1:-} == status && ${2:-} == --json ]] || exit 64
+if [[ ${HIVE_LARGE_OUTPUT:-0} == 1 ]]; then
+  printf '{"ok":true,"projects":[],"padding":"'
+  printf '%*s' 1049000 '' | tr ' ' x
+  printf '"}\n'
+  exit 0
+fi
 cat "${HIVE_STATUS_FIXTURE:?}"
