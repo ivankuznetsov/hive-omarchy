@@ -263,7 +263,7 @@ probe_instance() {
       else
         status_payload=$(<"$task_stdout")
       fi
-      if [[ -z $task_error ]] && jq -e '.ok == true and (.projects | type == "array")' >/dev/null 2>&1 <<<"$status_payload"; then
+      if [[ -z $task_error ]] && jq -e '.ok == true and ((.projects | type == "array") or (.schema == "hive-running-status" and (.tasks | type == "array")))' >/dev/null 2>&1 <<<"$status_payload"; then
         tasks_available=true
         tasks=$(jq -c --arg base "$url" --argjson max_tasks "$max_tasks_per_instance" '
           def active_attempt:
@@ -272,22 +272,25 @@ probe_instance() {
             ((.current_attempt.status? // "running") as $state |
               (["complete", "completed", "failed", "cancelled", "canceled", "error"] | index($state) | not));
           [
-            .projects[]? as $project
-            | $project.tasks[]?
+            (if .schema == "hive-running-status" then
+               .tasks[]? | . + {live_task_lock: (.liveness.running == true)}
+             else
+               .projects[]? as $project | $project.tasks[]? | . + {project: $project.name}
+             end)
             | select(
                 .live_task_lock == true or
                 .claude_pid_alive == true or
                 .marker == "running" or
                 active_attempt
               )
-            | (($project.name // "") | tostring | .[0:128]) as $project_name
+            | ((.project // "") | tostring | .[0:128]) as $project_name
             | ((.slug // "") | tostring | .[0:256]) as $slug
             | {
                 project: $project_name,
                 slug: $slug,
                 title: ((.display_name // .slug // "Task") | tostring | .[0:256]),
                 stage: ((.stage // "unknown") | tostring | .[0:64]),
-                status: ((.marker // .current_attempt.status // .action // "running") | tostring | .[0:64]),
+                status: ((.marker // .current_attempt.status // .status // .action // "running") | tostring | .[0:64]),
                 action: (if .action == null then null else (.action | tostring | .[0:64]) end),
                 web_url: ($base + "/tasks/" + ($project_name | @uri) + "/" + ($slug | @uri))
               }

@@ -52,6 +52,14 @@ assert_contains "$calls" 'ssh -o BatchMode=yes' "remote status should use batch-
 assert_contains "$calls" "hivebox env LANG=C.UTF-8 LC_ALL=C.UTF-8 bash -lc 'exec hive status --json'" "remote status should resolve Hive through the remote login PATH"
 pass "multiple local and remote Hives report daemon and active-task status"
 
+cat >"$test_root/running.json" <<'JSON'
+{"schema":"hive-running-status","ok":true,"tasks":[{"project":"alpha project","slug":"active","display_name":"Active task","stage":"review","status":"running","liveness":{"running":true}},{"project":"alpha project","slug":"done","status":"completed","liveness":{"running":false}}]}
+JSON
+result=$(PATH="$repo_dir/tests/fakes:/usr/bin:/bin" TEST_LOG="$test_root/calls.log" HIVE_STATUS_FIXTURE="$test_root/running.json" "$helper" --instances "$instances")
+assert_jq "$result" '.running_task_count == 2 and all(.instances[]; .tasks_available and .task_error == null and .tasks[0].project == "alpha project" and .tasks[0].status == "running")' "flat running status should report active tasks"
+assert_jq "$result" '.instances[1].tasks[0].web_url == "https://hivebox.example.test/tasks/alpha%20project/active"' "flat task links should preserve project names"
+pass "flat Hive running status supports local and SSH instances"
+
 result=$(run_helper --instances '[{"name":"Status only","url":"https://stopped.example.test","transport":"web"}]')
 assert_jq "$result" '.reachable == 1 and .daemon_running == 0' "a stopped daemon should remain distinguishable from an unreachable web"
 assert_jq "$result" '.instances[0].tasks_available == false and .instances[0].task_error == null' "web transport should be explicitly health-only"
