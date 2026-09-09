@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "io.github.ivankuznetsov.hive-status",
   "name": "Hive Status",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "author": "Ivan Kuznetsov",
   "license": "MIT",
   "description": "Monitor Hive instances and active tasks from the Omarchy bar.",
